@@ -1,34 +1,92 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
+# dependencies = [
+#     "orjson",
+# ]
 # ///
+# pyright: reportMissingImports=false
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
+
+import orjson
 
 
 class ReadToolInput(TypedDict):
     file_path: str
 
 
+class WriteToolInput(TypedDict):
+    file_path: str
+    content: str
+
+
+class EditToolInput(TypedDict):
+    file_path: str
+    old_string: str
+    new_string: str
+    replace_all: NotRequired[bool]
+
+
+ToolInput = ReadToolInput | WriteToolInput | EditToolInput
+
+
 class PostToolUseInput(TypedDict):
     session_id: str
-    tool_name: str
+    tool_name: Literal["Read", "Write", "Edit"]
     transcript_path: str
     cwd: str
-    hook_event_name: str
-    tool_input: ReadToolInput
+    hook_event_name: Literal["post-tool-use"]
+    tool_input: ToolInput
     tool_response: dict[str, Any]
 
 
-class TranscriptMessage(TypedDict):
-    type: NotRequired[str]
-    content: NotRequired[str | list[dict[str, Any]]]
-    message: NotRequired[dict[str, Any]]
+class ToolUseBlock(TypedDict):
+    type: Literal["tool_use"]
+    name: Literal["Read"] | str
+    id: str
+    input: dict[str, Any]
+
+
+class ToolResultBlock(TypedDict):
+    type: Literal["tool_result"]
+    tool_use_id: str
+    content: str | list[dict[str, Any]]
+    is_error: NotRequired[bool]
+
+
+class TextBlock(TypedDict):
+    type: Literal["text"]
+    text: str
+
+
+ContentBlock = ToolUseBlock | ToolResultBlock | TextBlock
+
+
+class AssistantMessage(TypedDict):
+    role: Literal["assistant"]
+    content: list[ContentBlock]
+
+
+class UserMessage(TypedDict):
+    role: Literal["user"]
+    content: str | list[ContentBlock]
+
+
+class TranscriptEntry(TypedDict):
+    type: Literal["user", "assistant"]
+    message: AssistantMessage | UserMessage
+    timestamp: NotRequired[str]
+
+
+class RawTranscriptEntry(TypedDict):
+    type: str
+    message: dict[str, Any]
+    timestamp: NotRequired[str]
 
 
 class LanguageGuideChecker:
@@ -61,40 +119,56 @@ class LanguageGuideChecker:
     def _get_guide_identifier(self, guide_content: str, guide_filename: str) -> str:
         return f"[language-guide:{guide_filename}]"
 
-    def _is_guide_in_transcript(self, identifier: str) -> bool:
+    def _has_guide_been_read(self, guide_path: Path) -> bool:
         if not self.transcript_path.exists():
             return False
 
         try:
-            with self.transcript_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
+            guide_path_str = str(guide_path)
+            transcript_content = self.transcript_path.read_text(encoding="utf-8")
+
+            for line in transcript_content.splitlines():
+                if not line.strip():
+                    continue
+
+                try:
+                    entry: RawTranscriptEntry = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    continue
+
+                if not isinstance(entry, dict):
+                    continue
+
+                if entry.get("type") != "assistant":
+                    continue
+
+                message = entry.get("message")
+                if not isinstance(message, dict):
+                    continue
+
+                if message.get("role") != "assistant":
+                    continue
+
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+
+                for block in content:
+                    if not isinstance(block, dict):
                         continue
 
-                    try:
-                        entry: TranscriptMessage = json.loads(line)
-
-                        contents_to_check = []
-
-                        if "content" in entry:
-                            contents_to_check.append(entry["content"])
-
-                        if "message" in entry and isinstance(entry["message"], dict):
-                            msg_content = entry["message"].get("content")
-                            if msg_content:
-                                contents_to_check.append(msg_content)
-
-                        for content in contents_to_check:
-                            if isinstance(content, list):
-                                content_str = json.dumps(content)
-                            else:
-                                content_str = str(content)
-
-                            if identifier in content_str:
-                                return True
-
-                    except (json.JSONDecodeError, KeyError, TypeError):
+                    if block.get("type") != "tool_use":
                         continue
+
+                    if block.get("name") != "Read":
+                        continue
+
+                    tool_input = block.get("input")
+                    if not isinstance(tool_input, dict):
+                        continue
+
+                    if tool_input.get("file_path") == guide_path_str:
+                        return True
 
             return False
 
@@ -113,13 +187,18 @@ class LanguageGuideChecker:
         if not guide_content:
             return ""
 
-        guide_filename = guide_path.name
-        identifier = self._get_guide_identifier(guide_content, guide_filename)
-
-        if self._is_guide_in_transcript(identifier):
+        if self._has_guide_been_read(guide_path):
             return ""
 
-        return f"[language-guide:{guide_filename}]\n{guide_content}"
+        file_extension = extension[1:].upper()
+
+        warning_message = (
+            f"ACTION REQUIRED: Use Read tool to read guide for {file_extension} immediately. READ NOW."
+            f"You MUST read the following guide before proceeding with {path.name}:\n"
+            f"{guide_path}\n\n"
+        )
+
+        return warning_message
 
 
 def main() -> None:
@@ -133,15 +212,9 @@ def main() -> None:
             print(f"[{hook_filename}] Skipping: No input provided")
             sys.exit(0)
 
-        data: PostToolUseInput = json.loads(input_raw)
-    except (json.JSONDecodeError, KeyError, TypeError):
+        data: PostToolUseInput = orjson.loads(input_raw)
+    except (orjson.JSONDecodeError, KeyError, TypeError):
         print(f"[{hook_filename}] Skipping: Invalid input format")
-        sys.exit(0)
-
-    tool_name = data["tool_name"]
-
-    if tool_name not in ("Read", "Write", "Edit", "MultiEdit"):
-        print(f"[{hook_filename}] Skipping: Tool {tool_name} not relevant")
         sys.exit(0)
 
     tool_input = data["tool_input"]
@@ -157,9 +230,6 @@ def main() -> None:
 
     cwd = data["cwd"]
     transcript_path = data["transcript_path"]
-
-    print(f"[{hook_filename}] DEBUG: transcript_path = {transcript_path}", file=sys.stderr)
-    print(f"[{hook_filename}] DEBUG: transcript exists = {Path(transcript_path).exists()}", file=sys.stderr)
 
     checker = LanguageGuideChecker(cwd, transcript_path)
     message = checker.check_and_inject(file_path)
