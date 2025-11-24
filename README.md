@@ -282,6 +282,13 @@ Breaking down this flow:
 
 (Skipping deeper discussion to avoid going too deep)
 
+## Updates
+
+### 2025-11-24
+- Added **librarian agent** inspired by [ampcode](https://ampcode.com/) - a specialized research agent for searching remote codebases, retrieving official documentation, and finding implementation examples using GitHub CLI and Context7.
+- Added **git-committer skill** for maintaining clean commit graphs - analyzes changes, divides them into atomic working units, and automatically commits them following dependency order. This is something I personally use to keep commit history clean and reviewable.
+- Added PR-related skills and commands (`pr-creator`, `pr-context-retrieval`, `/commit`, `/create-pr`, `/read-pr`)
+
 ## End
 
 Even earlier this year (until early 2025), what AI Agents could do was extremely limited and very expensive, but not anymore.
