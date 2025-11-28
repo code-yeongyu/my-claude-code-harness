@@ -21,6 +21,16 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script ~/.claude/hooks/stop.py"
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
